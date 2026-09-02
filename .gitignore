@@ -1,0 +1,11 @@
+# PlatformIO build outputs and caches
+.pio/
+.vscode/
+.clangd/
+
+# Ignore local configuration files if you use config.h
+include/config.h
+
+# OS metadata
+.DS_Store
+Thumbs.db
