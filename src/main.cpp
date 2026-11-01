@@ -17,7 +17,7 @@
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 Adafruit_MPU6050 mpu;
 
-// Hardware & Config
+// Hardware and Config
 const int SWITCH_PIN = 4;
 const char* PILOT_ID = "PILOT-406";
 const char* LOG_FILE = "/log.txt";
@@ -50,11 +50,9 @@ const unsigned long LOG_INTERVAL = 500;
 int recordedEntries = 0;
 String sessionHMAC = "";
 
-// Retry Logic: bundles that haven't been uploaded yet are kept on the device
 unsigned long lastRetryTime = 0;
 const unsigned long RETRY_INTERVAL = 10000;
 
-// Compute HMAC-SHA256 signature using MbedTLS
 String computeFileHMAC256(const char* path) {
   File file = SPIFFS.open(path, "r");
   if (!file) return "";
@@ -63,7 +61,6 @@ String computeFileHMAC256(const char* path) {
   mbedtls_md_type_t md_type = MBEDTLS_MD_SHA256;
   mbedtls_md_init(&ctx);
 
-  // Initialize with HMAC enabled (1)
   mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(md_type), 1);
   mbedtls_md_hmac_starts(&ctx, (const unsigned char*)SECRET_KEY, strlen(SECRET_KEY));
 
@@ -87,10 +84,7 @@ String computeFileHMAC256(const char* path) {
   return String(hmacStr);
 }
 
-// Each finished session is saved as its own bundle file:
-// /bundle_0001.json, /bundle_0002.json, ...
-// A bundle is only deleted after the server confirms it, so an unsent
-// bundle is never overwritten by a new session.
+
 int highestBundleNumber() {
   int highestNumber = 0;
   File root = SPIFFS.open("/");
@@ -107,7 +101,6 @@ int highestBundleNumber() {
   return highestNumber;
 }
 
-// Returns the path of the oldest bundle waiting to be sent, or "" if none
 String oldestPendingBundle() {
   String oldestPath = "";
   File root = SPIFFS.open("/");
@@ -116,7 +109,6 @@ String oldestPendingBundle() {
     String filePath = file.name();
     if (filePath.indexOf("bundle_") >= 0) {
       if (!filePath.startsWith("/")) filePath = "/" + filePath;
-      // Numbers are zero-padded, so the smallest name is the oldest bundle
       if (oldestPath == "" || filePath < oldestPath) oldestPath = filePath;
     }
     file = root.openNextFile();
@@ -151,7 +143,6 @@ bool createDataBundle(String hmacSig, const String& bundlePath) {
   return true;
 }
 
-// Sends one saved bundle. The file is deleted only if the server accepts it.
 bool postBundle(const String& bundlePath) {
   File bundleFile = SPIFFS.open(bundlePath, "r");
   if (!bundleFile) return false;
@@ -172,15 +163,11 @@ bool postBundle(const String& bundlePath) {
 }
 
 bool uploadBundleOverWiFi(const String& bundlePath) {
-    // If not connected, launch Captive Portal or reconnect automatically
     if (WiFi.status() != WL_CONNECTED) {
         WiFiManager wm;
         
-        // Set timeout so it doesn't block forever if no Wi-Fi is available
         wm.setConfigPortalTimeout(180); 
 
-        // Automatically connects using saved credentials,
-        // or starts AP "ESP32-Telemetry-Setup" if connection fails
         if (!wm.autoConnect("ESP32-Telemetry-Setup")) {
             Serial.println("Failed to connect or hit portal timeout");
             return false;
@@ -190,8 +177,6 @@ bool uploadBundleOverWiFi(const String& bundlePath) {
     return postBundle(bundlePath);
 }
 
-// Runs in the background while not recording: if a bundle is still waiting
-// and WiFi is available, try to send it again.
 void retryPendingBundles() {
   if (millis() - lastRetryTime < RETRY_INTERVAL) return;
   lastRetryTime = millis();
@@ -230,8 +215,6 @@ void setup() {
   mpu.setGyroRange(MPU6050_RANGE_500_DEG);
   mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
 
-  // Start connecting with saved credentials (non-blocking), so any
-  // bundles left over from earlier sessions can be sent
   WiFi.mode(WIFI_STA);
   WiFi.begin();
 }
@@ -261,7 +244,6 @@ void loop() {
 
           sessionHMAC = computeFileHMAC256(LOG_FILE);
 
-          // Save the signed bundle on the device BEFORE trying to send it
           char bundlePath[32];
           snprintf(bundlePath, sizeof(bundlePath), "/bundle_%04d.json", highestBundleNumber() + 1);
           bool saved = createDataBundle(sessionHMAC, bundlePath);
@@ -292,7 +274,6 @@ void loop() {
   }
   lastRawReading = currentRawReading;
 
-  // Resend any saved bundles that haven't reached the server yet
   if (currentState == STATE_IDLE || currentState == STATE_SIGN_OFF) {
     retryPendingBundles();
   }
@@ -347,7 +328,6 @@ void loop() {
         recordedEntries++;
         File logFile = SPIFFS.open(LOG_FILE, "a");
         if (logFile) {
-          // time_ms, accel x/y/z (m/s^2), gyro x/y/z (rad/s), temperature (C)
           logFile.printf("%lu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.1f\n",
                          now, calAccelX, calAccelY, calAccelZ,
                          calGyroX, calGyroY, calGyroZ, temp.temperature);
