@@ -38,6 +38,7 @@ by shorting GPIO PIN 4 to GND on the ESP32 with a Dupont wire (or wire up your o
 # Setting up the backend: 
 
 Follow the steps in the README.md provided on my other repository, flight-data-backend. 
+https://github.com/thenothingalternative-design/flight-data-backend . 
 Note that you'll need a config.h file with the Railway Server URL and your own secret key. 
 Mine's not included... because it holds my secret key. 
 
