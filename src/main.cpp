@@ -21,7 +21,6 @@ Adafruit_MPU6050 mpu;
 const int SWITCH_PIN = 4;
 const char* PILOT_ID = "PILOT-406";
 const char* LOG_FILE = "/log.txt";
-const char* BUNDLE_FILE = "/bundle.json";
 
 enum SystemState {
   STATE_CALIBRATING,
@@ -41,13 +40,19 @@ const unsigned long DEBOUNCE_DELAY = 50;
 // Calibration & Logging Timing
 const int CALIBRATION_SAMPLES = 50;
 int sampleCount = 0;
-float accelZSum = 0.0, gyroXSum = 0.0;
-float accelZOffset = 0.0, gyroXOffset = 0.0;
+float accelXSum = 0.0, accelYSum = 0.0, accelZSum = 0.0;
+float gyroXSum = 0.0, gyroYSum = 0.0, gyroZSum = 0.0;
+float accelXOffset = 0.0, accelYOffset = 0.0, accelZOffset = 0.0;
+float gyroXOffset = 0.0, gyroYOffset = 0.0, gyroZOffset = 0.0;
 
 unsigned long lastLogTime = 0;
 const unsigned long LOG_INTERVAL = 500;
 int recordedEntries = 0;
 String sessionHMAC = "";
+
+// Retry Logic: bundles that haven't been uploaded yet are kept on the device
+unsigned long lastRetryTime = 0;
+const unsigned long RETRY_INTERVAL = 10000;
 
 // Compute HMAC-SHA256 signature using MbedTLS
 String computeFileHMAC256(const char* path) {
@@ -82,7 +87,44 @@ String computeFileHMAC256(const char* path) {
   return String(hmacStr);
 }
 
-bool createDataBundle(String hmacSig) {
+// Each finished session is saved as its own bundle file:
+// /bundle_0001.json, /bundle_0002.json, ...
+// A bundle is only deleted after the server confirms it, so an unsent
+// bundle is never overwritten by a new session.
+int highestBundleNumber() {
+  int highestNumber = 0;
+  File root = SPIFFS.open("/");
+  File file = root.openNextFile();
+  while (file) {
+    String fileName = file.name();
+    int namePosition = fileName.indexOf("bundle_");
+    if (namePosition >= 0) {
+      int bundleNumber = fileName.substring(namePosition + 7).toInt();
+      if (bundleNumber > highestNumber) highestNumber = bundleNumber;
+    }
+    file = root.openNextFile();
+  }
+  return highestNumber;
+}
+
+// Returns the path of the oldest bundle waiting to be sent, or "" if none
+String oldestPendingBundle() {
+  String oldestPath = "";
+  File root = SPIFFS.open("/");
+  File file = root.openNextFile();
+  while (file) {
+    String filePath = file.name();
+    if (filePath.indexOf("bundle_") >= 0) {
+      if (!filePath.startsWith("/")) filePath = "/" + filePath;
+      // Numbers are zero-padded, so the smallest name is the oldest bundle
+      if (oldestPath == "" || filePath < oldestPath) oldestPath = filePath;
+    }
+    file = root.openNextFile();
+  }
+  return oldestPath;
+}
+
+bool createDataBundle(String hmacSig, const String& bundlePath) {
   File logFile = SPIFFS.open(LOG_FILE, "r");
   if (!logFile) return false;
 
@@ -92,12 +134,12 @@ bool createDataBundle(String hmacSig) {
   rawLogs.trim();
   rawLogs.replace("\n", "\",\n    \"");
 
-  File bundleFile = SPIFFS.open(BUNDLE_FILE, "w");
+  File bundleFile = SPIFFS.open(bundlePath, "w");
   if (!bundleFile) return false;
 
   bundleFile.println("{");
   bundleFile.printf("  \"pilot_id\": \"%s\",\n", PILOT_ID);
-  bundleFile.printf("  \"timestamp_ms\": %lu,\n", millis());
+  bundleFile.printf("  \"upload_timestamp\": \"%lu\",\n", millis());
   bundleFile.printf("  \"sha256_signature\": \"%s\",\n", hmacSig.c_str());
   bundleFile.printf("  \"total_entries\": %d,\n", recordedEntries);
   bundleFile.println("  \"telemetry_log\": [");
@@ -109,7 +151,27 @@ bool createDataBundle(String hmacSig) {
   return true;
 }
 
-bool uploadBundleOverWiFi() {
+// Sends one saved bundle. The file is deleted only if the server accepts it.
+bool postBundle(const String& bundlePath) {
+  File bundleFile = SPIFFS.open(bundlePath, "r");
+  if (!bundleFile) return false;
+
+  String payload = bundleFile.readString();
+  bundleFile.close();
+
+  HTTPClient http;
+  http.begin(SERVER_URL);
+  http.addHeader("Content-Type", "application/json");
+
+  int httpCode = http.POST(payload);
+  http.end();
+
+  bool success = (httpCode == 200 || httpCode == 201);
+  if (success) SPIFFS.remove(bundlePath);
+  return success;
+}
+
+bool uploadBundleOverWiFi(const String& bundlePath) {
     // If not connected, launch Captive Portal or reconnect automatically
     if (WiFi.status() != WL_CONNECTED) {
         WiFiManager wm;
@@ -125,20 +187,30 @@ bool uploadBundleOverWiFi() {
         }
     }
 
-    File bundleFile = SPIFFS.open(BUNDLE_FILE, "r");
-    if (!bundleFile) return false;
+    return postBundle(bundlePath);
+}
 
-    String payload = bundleFile.readString();
-    bundleFile.close();
+// Runs in the background while not recording: if a bundle is still waiting
+// and WiFi is available, try to send it again.
+void retryPendingBundles() {
+  if (millis() - lastRetryTime < RETRY_INTERVAL) return;
+  lastRetryTime = millis();
 
-    HTTPClient http;
-    http.begin(SERVER_URL);
-    http.addHeader("Content-Type", "application/json");
+  String bundlePath = oldestPendingBundle();
+  if (bundlePath == "") return;
 
-    int httpCode = http.POST(payload);
-    http.end();
+  if (WiFi.status() != WL_CONNECTED) {
+    WiFi.reconnect();
+    return;
+  }
 
-    return (httpCode == 200 || httpCode == 201);
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("STATUS: [ RETRY ]");
+  display.println("Sending saved data...");
+  display.display();
+
+  postBundle(bundlePath);
 }
 
 void setup() {
@@ -157,6 +229,11 @@ void setup() {
   mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
   mpu.setGyroRange(MPU6050_RANGE_500_DEG);
   mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+
+  // Start connecting with saved credentials (non-blocking), so any
+  // bundles left over from earlier sessions can be sent
+  WiFi.mode(WIFI_STA);
+  WiFi.begin();
 }
 
 void loop() {
@@ -183,18 +260,24 @@ void loop() {
           display.display();
 
           sessionHMAC = computeFileHMAC256(LOG_FILE);
-          createDataBundle(sessionHMAC);
 
-          bool success = uploadBundleOverWiFi();
+          // Save the signed bundle on the device BEFORE trying to send it
+          char bundlePath[32];
+          snprintf(bundlePath, sizeof(bundlePath), "/bundle_%04d.json", highestBundleNumber() + 1);
+          bool saved = createDataBundle(sessionHMAC, bundlePath);
+
+          bool success = saved && uploadBundleOverWiFi(bundlePath);
           
           display.clearDisplay();
           display.setCursor(0, 0);
           if (success) {
             display.println("UPLOAD SUCCESS!");
             display.println("HMAC Verified.");
-          } else {
+          } else if (saved) {
             display.println("UPLOAD FAILED!");
-            display.println("Check Network/IP");
+            display.println("Saved. Will retry.");
+          } else {
+            display.println("SAVE FAILED!");
           }
           display.display();
           delay(2000);
@@ -209,6 +292,11 @@ void loop() {
   }
   lastRawReading = currentRawReading;
 
+  // Resend any saved bundles that haven't reached the server yet
+  if (currentState == STATE_IDLE || currentState == STATE_SIGN_OFF) {
+    retryPendingBundles();
+  }
+
   sensors_event_t accel, gyro, temp;
   mpu.getEvent(&accel, &gyro, &temp);
 
@@ -217,12 +305,20 @@ void loop() {
 
   switch (currentState) {
     case STATE_CALIBRATING: {
+      accelXSum += accel.acceleration.x;
+      accelYSum += accel.acceleration.y;
       accelZSum += accel.acceleration.z;
       gyroXSum += gyro.gyro.x;
+      gyroYSum += gyro.gyro.y;
+      gyroZSum += gyro.gyro.z;
       sampleCount++;
       if (sampleCount >= CALIBRATION_SAMPLES) {
+        accelXOffset = accelXSum / CALIBRATION_SAMPLES;
+        accelYOffset = accelYSum / CALIBRATION_SAMPLES;
         accelZOffset = (accelZSum / CALIBRATION_SAMPLES) - 9.81;
-        gyroXOffset = (gyroXSum / CALIBRATION_SAMPLES);
+        gyroXOffset = gyroXSum / CALIBRATION_SAMPLES;
+        gyroYOffset = gyroYSum / CALIBRATION_SAMPLES;
+        gyroZOffset = gyroZSum / CALIBRATION_SAMPLES;
         currentState = STATE_IDLE;
       }
       delay(30);
@@ -232,14 +328,18 @@ void loop() {
     case STATE_IDLE: {
       display.println("STATUS: [ IDLE ]");
       display.println("--------------------");
-      display.println("Touch GPIO4 to GND");
-      display.println("to START recording.");
+      display.println("Press Button to");
+      display.println("START recording.");
       break;
     }
 
     case STATE_RECORDING: {
+      float calAccelX = accel.acceleration.x - accelXOffset;
+      float calAccelY = accel.acceleration.y - accelYOffset;
       float calAccelZ = accel.acceleration.z - accelZOffset;
       float calGyroX = gyro.gyro.x - gyroXOffset;
+      float calGyroY = gyro.gyro.y - gyroYOffset;
+      float calGyroZ = gyro.gyro.z - gyroZOffset;
       unsigned long now = millis();
 
       if (now - lastLogTime >= LOG_INTERVAL) {
@@ -247,7 +347,10 @@ void loop() {
         recordedEntries++;
         File logFile = SPIFFS.open(LOG_FILE, "a");
         if (logFile) {
-          logFile.printf("%lu,%.2f,%.2f,%.1f\n", now, calAccelZ, calGyroX, temp.temperature);
+          // time_ms, accel x/y/z (m/s^2), gyro x/y/z (rad/s), temperature (C)
+          logFile.printf("%lu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.1f\n",
+                         now, calAccelX, calAccelY, calAccelZ,
+                         calGyroX, calGyroY, calGyroZ, temp.temperature);
           logFile.close();
         }
       }
@@ -268,7 +371,7 @@ void loop() {
       display.print("Entries: ");
       display.println(recordedEntries);
       display.println("HMAC Signed!");
-      display.println("Touch to Reset.");
+      display.println("Press button to Reset.");
       break;
     }
   }
