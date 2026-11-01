@@ -41,6 +41,13 @@ Follow the steps in the README.md provided on my other repository, flight-data-b
 Note that you'll need a config.h file with the Railway Server URL and your own secret key. 
 Mine's not included... because it holds my secret key. 
 
+# Using the Logger: 
+
+After you've set everything up, press the Build button (the checkmark). 
+Once it succeeds, press the Upload (-> button) to flash the code to the ESP32. 
+Upon first boot, you won't have any wifi saved. Connect your phone to the "ESP32-Telemetry-Setup" 
+network and choose your WiFi in the page that opens. Credentials are remembered afterwards. 
+
 
 
 
